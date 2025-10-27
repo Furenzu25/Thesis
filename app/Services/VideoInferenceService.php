@@ -9,16 +9,21 @@ use Illuminate\Support\Facades\Storage;
 
 class VideoInferenceService
 {
-    private string $modelPath = '/Users/jfrtenebroso/Developer/Thesis/best.pt';
+    private string $modelPath;
     private string $condaEnv = 'yolov8_m4';
+    
+    public function __construct()
+    {
+        $this->modelPath = $this->getModelPath();
+    }
     
     public function processVideo(Video $video): bool
     {
         $startTime = time();
         
         try {
-            // Validate model exists
-            if (!file_exists($this->modelPath)) {
+            // Validate model exists (skip check for built-in YOLO models)
+            if (!$this->isBuiltInModel($this->modelPath) && !file_exists($this->modelPath)) {
                 throw new \Exception("Model file not found at: {$this->modelPath}");
             }
 
@@ -129,6 +134,47 @@ class VideoInferenceService
         @unlink($scriptPath);
     }
 
+    private function getModelPath(): string
+    {
+        // Try custom model paths in order of preference
+        $possiblePaths = [
+            '/Users/jfrtenebroso/Developer/Thesis-Yolov8/best.pt',
+            '/Users/jfrtenebroso/Developer/Thesis/2025-10-18_stage6_final/weights/best.pt',
+            '/Users/jfrtenebroso/Developer/LaravelDevelopment/Thesis/2025-10-18_stage6_final/weights/best.pt',
+            '/Users/jfrtenebroso/Developer/LaravelDevelopment/Thesis/model/best.pt',
+            base_path('model/best.pt'),
+            // Fallback to YOLO's built-in models if no custom model found
+            'yolov8x.pt',  // Extra large model (matches your custom yolov8x)
+            'yolov8m.pt',  // Medium model
+            'yolov8n.pt',  // Nano model (fastest)
+            'yolov8s.pt',  // Small model
+        ];
+
+        foreach ($possiblePaths as $path) {
+            if (file_exists($path)) {
+                Log::info("Using model at: {$path}");
+                return $path;
+            }
+        }
+
+        // If no custom model found, return a YOLO built-in model name
+        // YOLO will automatically download it when first used
+        Log::info("No custom model found, using built-in yolov8m.pt");
+        return 'yolov8m.pt';
+    }
+
+    private function isBuiltInModel(string $modelPath): bool
+    {
+        // List of YOLO built-in model identifiers
+        $builtInModels = [
+            'yolov8n.pt', 'yolov8s.pt', 'yolov8m.pt', 'yolov8l.pt', 'yolov8x.pt',
+            'yolov8n-cls.pt', 'yolov8s-cls.pt', 'yolov8m-cls.pt', 'yolov8l-cls.pt', 'yolov8x-cls.pt',
+            'yolov8n-seg.pt', 'yolov8s-seg.pt', 'yolov8m-seg.pt', 'yolov8l-seg.pt', 'yolov8x-seg.pt',
+        ];
+        
+        return in_array(basename($modelPath), $builtInModels);
+    }
+
     private function getCondaPythonPath(): string
     {
         // Hardcode your exact conda Python path
@@ -162,9 +208,21 @@ def main():
     print(f"[INFO] Working directory: {os.getcwd()}", file=sys.stderr)
     print(f"[INFO] Loading model from: {args.model}", file=sys.stderr)
     
-    if not os.path.exists(args.model):
+    # Check if it's a built-in YOLO model or custom model file
+    builtin_models = [
+        'yolov8n.pt', 'yolov8s.pt', 'yolov8m.pt', 'yolov8l.pt', 'yolov8x.pt',
+        'yolov8n-cls.pt', 'yolov8s-cls.pt', 'yolov8m-cls.pt', 'yolov8l-cls.pt', 'yolov8x-cls.pt',
+        'yolov8n-seg.pt', 'yolov8s-seg.pt', 'yolov8m-seg.pt', 'yolov8l-seg.pt', 'yolov8x-seg.pt',
+    ]
+    
+    if os.path.basename(args.model) not in builtin_models and not os.path.exists(args.model):
         print(f"[ERROR] Model not found at {args.model}", file=sys.stderr)
         sys.exit(1)
+    
+    if os.path.basename(args.model) in builtin_models:
+        print(f"[INFO] Using built-in YOLO model: {args.model}", file=sys.stderr)
+    else:
+        print(f"[INFO] Using custom model file: {args.model}", file=sys.stderr)
         
     model = YOLO(args.model)
     print(f"[INFO] Model loaded successfully!", file=sys.stderr)

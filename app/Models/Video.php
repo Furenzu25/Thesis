@@ -30,14 +30,14 @@ class Video extends Model
     public function getOriginalVideoUrlAttribute(): ?string
     {
         return $this->original_path 
-            ? Storage::disk('videos')->url($this->original_path) 
+            ? route('video.serve', ['video' => $this->id, 'type' => 'original'])
             : null;
     }
 
     public function getProcessedVideoUrlAttribute(): ?string
     {
         return $this->processed_path 
-            ? Storage::disk('processed_videos')->url($this->processed_path) 
+            ? route('video.serve', ['video' => $this->id, 'type' => 'processed'])
             : null;
     }
 

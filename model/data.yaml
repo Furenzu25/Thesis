@@ -1,0 +1,22 @@
+path: /Users/jfrtenebroso/Developer/Thesis/annotated_videos/dataset
+
+# Train and validation paths (relative to 'path')
+train: images/train
+val: images/val
+
+
+nc: 12  # number of classes
+names:
+  0: sedan
+  1: bus
+  2: motorcycle
+  3: jeepney(sarao)
+  4: truck
+  5: medium_sized
+  6: jeepney(uso-uso)
+  7: jeepney(multicab)
+  8: van
+  9: autorickshaw
+  10: tricycle
+  11: compact vehicle
+
