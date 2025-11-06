@@ -25,27 +25,96 @@ class VideoResource extends Resource
     {
         return $form
             ->schema([
-                Forms\Components\Section::make('Video Information')
+                Forms\Components\Section::make('Video Upload')
+                    ->description('Upload MP4 video. Recommended duration: under 5 minutes. Ensure a clear frontal view of traffic with minimal camera movement.')
                     ->schema([
                         Forms\Components\TextInput::make('title')
                             ->required()
-                            ->maxLength(255),
+                            ->maxLength(255)
+                            ->placeholder('e.g., MatinaCrossing_MorningTraffic'),
                         
                         Forms\Components\Textarea::make('description')
                             ->rows(3)
-                            ->maxLength(500),
+                            ->maxLength(500)
+                            ->placeholder('Optional description of the video content'),
                         
                         Forms\Components\FileUpload::make('original_path')
                             ->label('Video File')
                             ->disk('videos')
                             ->directory('uploads')
-                            ->acceptedFileTypes(['video/mp4', 'video/avi', 'video/mov', 'video/quicktime'])
-                            ->maxSize(524288) // 512 MB in KB (512 * 1024 = 524288)
+                            ->acceptedFileTypes(['video/mp4'])
+                            ->maxSize(524288) // 512 MB
                             ->required()
                             ->downloadable()
-                            ->visibility('private'),
+                            ->visibility('private')
+                            ->helperText('Upload .mp4 file (max 512 MB). Recommended: under 5 minutes.')
+                            ->reactive(),
                     ])
-                    ->columnSpan('full'),
+                    ->columns(1)
+                    ->collapsible(),
+
+                Forms\Components\Section::make('Metadata')
+                    ->description('These fields help identify and categorize your video for consistent labeling')
+                    ->schema([
+                        Forms\Components\TextInput::make('location_name')
+                            ->label('Location Name')
+                            ->placeholder('e.g., JP Laurel - Bajada')
+                            ->maxLength(255)
+                            ->helperText('Traffic location or intersection name'),
+                        
+                        Forms\Components\Select::make('time_of_day')
+                            ->label('Time of Day')
+                            ->options([
+                                'Early Morning' => 'Early Morning (5:00-7:00)',
+                                'Morning' => 'Morning (7:00-10:00)',
+                                'Midday' => 'Midday (10:00-14:00)',
+                                'Afternoon' => 'Afternoon (14:00-17:00)',
+                                'Evening' => 'Evening (17:00-20:00)',
+                                'Night' => 'Night (20:00-5:00)',
+                            ])
+                            ->native(false)
+                            ->placeholder('Select time of day'),
+                        
+                        Forms\Components\Select::make('weather_condition')
+                            ->label('Weather Condition')
+                            ->options([
+                                'Clear' => 'Clear',
+                                'Partly Cloudy' => 'Partly Cloudy',
+                                'Cloudy' => 'Cloudy',
+                                'Light Rain' => 'Light Rain',
+                                'Heavy Rain' => 'Heavy Rain',
+                                'Foggy' => 'Foggy',
+                            ])
+                            ->native(false)
+                            ->placeholder('Select weather condition'),
+                    ])
+                    ->columns(3)
+                    ->collapsible(),
+
+                Forms\Components\Section::make('Advanced Configuration')
+                    ->description('For debugging and experimentation purposes (optional)')
+                    ->schema([
+                        Forms\Components\Grid::make(2)
+                            ->schema([
+                                Forms\Components\TextInput::make('confidence_threshold')
+                                    ->label('Detection Confidence Threshold')
+                                    ->numeric()
+                                    ->default(0.25)
+                                    ->minValue(0.10)
+                                    ->maxValue(0.90)
+                                    ->step(0.05)
+                                    ->helperText('Range: 0.10 - 0.90 (Default: 0.25)')
+                                    ->suffix('%')
+                                    ->reactive(),
+                                
+                                Forms\Components\Toggle::make('privacy_blur_enabled')
+                                    ->label('Enable Privacy Blur')
+                                    ->helperText('Anonymize faces and license plates (if supported)')
+                                    ->default(false),
+                            ]),
+                    ])
+                    ->collapsed()
+                    ->collapsible(),
             ]);
     }
 
@@ -54,11 +123,26 @@ class VideoResource extends Resource
         return $table
             ->columns([
                 Tables\Columns\TextColumn::make('id')
+                    ->label('ID')
                     ->sortable(),
                 
                 Tables\Columns\TextColumn::make('title')
                     ->searchable()
-                    ->sortable(),
+                    ->sortable()
+                    ->limit(30),
+                
+                Tables\Columns\TextColumn::make('metadata_label')
+                    ->label('Metadata')
+                    ->limit(40)
+                    ->tooltip(fn (Video $record): string => $record->metadata_label),
+                
+                Tables\Columns\TextColumn::make('duration_formatted')
+                    ->label('Duration')
+                    ->sortable('duration_seconds'),
+                
+                Tables\Columns\TextColumn::make('resolution')
+                    ->label('Resolution')
+                    ->toggleable(),
                 
                 Tables\Columns\TextColumn::make('file_size_formatted')
                     ->label('File Size'),
@@ -71,13 +155,16 @@ class VideoResource extends Resource
                         'danger' => 'failed',
                     ]),
                 
-                Tables\Columns\TextColumn::make('processing_duration')
-                    ->label('Duration (s)')
-                    ->sortable(),
+                Tables\Columns\TextColumn::make('processing_progress')
+                    ->label('Progress')
+                    ->formatStateUsing(fn ($state) => $state ? "{$state}%" : 'N/A')
+                    ->visible(fn (Video $record) => $record->isProcessing()),
                 
                 Tables\Columns\TextColumn::make('created_at')
+                    ->label('Uploaded')
                     ->dateTime()
-                    ->sortable(),
+                    ->sortable()
+                    ->since(),
             ])
             ->filters([
                 Tables\Filters\SelectFilter::make('status')
@@ -86,6 +173,33 @@ class VideoResource extends Resource
                         'processing' => 'Processing',
                         'completed' => 'Completed',
                         'failed' => 'Failed',
+                    ]),
+                
+                Tables\Filters\SelectFilter::make('location_name')
+                    ->label('Location')
+                    ->options(fn () => Video::whereNotNull('location_name')
+                        ->distinct()
+                        ->pluck('location_name', 'location_name')
+                        ->toArray()),
+                
+                Tables\Filters\SelectFilter::make('time_of_day')
+                    ->options([
+                        'Early Morning' => 'Early Morning',
+                        'Morning' => 'Morning',
+                        'Midday' => 'Midday',
+                        'Afternoon' => 'Afternoon',
+                        'Evening' => 'Evening',
+                        'Night' => 'Night',
+                    ]),
+                
+                Tables\Filters\SelectFilter::make('weather_condition')
+                    ->options([
+                        'Clear' => 'Clear',
+                        'Partly Cloudy' => 'Partly Cloudy',
+                        'Cloudy' => 'Cloudy',
+                        'Light Rain' => 'Light Rain',
+                        'Heavy Rain' => 'Heavy Rain',
+                        'Foggy' => 'Foggy',
                     ]),
             ])
             ->actions([

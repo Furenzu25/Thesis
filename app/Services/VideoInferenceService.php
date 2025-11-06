@@ -17,7 +17,7 @@ class VideoInferenceService
         $this->modelPath = $this->getModelPath();
     }
     
-    public function processVideo(Video $video): bool
+    public function processVideo(Video $video, ?callable $progressCallback = null): bool
     {
         $startTime = time();
         
@@ -39,21 +39,29 @@ class VideoInferenceService
                 mkdir($outputDir, 0755, true);
             }
 
-            // Run inference
-            $this->runInference($originalPath, $processedPath);
+            // Run inference with progress tracking
+            $stats = $this->runInference($originalPath, $processedPath, $video, $progressCallback);
 
             // Verify output was created
             if (!file_exists($processedPath)) {
                 throw new \Exception("Processed video was not created");
             }
 
-            // Update video record
-            $video->update([
+            // Update video record with final statistics
+            $updateData = [
                 'processed_path' => $processedFilename,
                 'status' => 'completed',
                 'processing_duration' => time() - $startTime,
+                'processing_progress' => 100,
                 'error_message' => null,
-            ]);
+            ];
+            
+            // Add final statistics if captured
+            if (!empty($stats)) {
+                $updateData = array_merge($updateData, $stats);
+            }
+            
+            $video->update($updateData);
 
             return true;
 
@@ -73,7 +81,7 @@ class VideoInferenceService
         }
     }
 
-    private function runInference(string $inputPath, string $outputPath): void
+    private function runInference(string $inputPath, string $outputPath, Video $video, ?callable $progressCallback = null): array
     {
         // Python script for YOLO inference
         $script = $this->getInferenceScript();
@@ -93,20 +101,24 @@ class VideoInferenceService
         // Change to Laravel project directory before running
         $projectPath = base_path();
 
-        // Run Python inference
+        // Build command with confidence threshold from video
+        $confidenceThreshold = $video->confidence_threshold ?? 0.25;
+        
         $command = sprintf(
-            'cd %s && %s %s --model %s --source %s --output %s 2>&1',
+            'cd %s && %s %s --model %s --source %s --output %s --conf %s 2>&1',
             escapeshellarg($projectPath),
             escapeshellarg($condaPath),
             escapeshellarg($scriptPath),
             escapeshellarg($this->modelPath),
             escapeshellarg($inputPath),
-            escapeshellarg($outputPath)
+            escapeshellarg($outputPath),
+            $confidenceThreshold
         );
 
         Log::info('Running inference command', [
             'command' => $command,
             'working_dir' => $projectPath,
+            'confidence_threshold' => $confidenceThreshold,
         ]);
 
         $result = Process::timeout(600)->run($command);
@@ -130,17 +142,77 @@ class VideoInferenceService
             throw new \Exception("Inference failed. Last output: " . $shortError);
         }
 
+        // Parse statistics from output
+        $stats = $this->parseInferenceOutput($result->output(), $progressCallback);
+
         // Clean up script
         @unlink($scriptPath);
+        
+        return $stats;
+    }
+    
+    private function parseInferenceOutput(string $output, ?callable $progressCallback = null): array
+    {
+        $stats = [
+            'total_frames' => 0,
+            'processed_frames' => 0,
+            'total_detections' => 0,
+            'average_detections_per_frame' => 0.0,
+        ];
+        
+        $lines = explode("\n", $output);
+        $detectionCounts = [];
+        
+        foreach ($lines as $line) {
+            // Parse frame processing lines: "Frame 30: 5 detections"
+            if (preg_match('/Frame\s+(\d+):\s+(\d+)\s+detections/', $line, $matches)) {
+                $frameNumber = (int)$matches[1];
+                $detectionCount = (int)$matches[2];
+                
+                $stats['processed_frames'] = $frameNumber;
+                $detectionCounts[] = $detectionCount;
+                
+                // Calculate progress and update callback
+                if ($progressCallback && $stats['total_frames'] > 0) {
+                    $progress = round(($frameNumber / $stats['total_frames']) * 100, 2);
+                    $progressCallback($progress, [
+                        'processed_frames' => $frameNumber,
+                        'total_frames' => $stats['total_frames'],
+                    ]);
+                }
+            }
+            
+            // Parse total frames: "[INFO] Processed 180 frames"
+            if (preg_match('/\[INFO\]\s+Processed\s+(\d+)\s+frames/', $line, $matches)) {
+                $stats['total_frames'] = (int)$matches[1];
+                $stats['processed_frames'] = (int)$matches[1];
+            }
+            
+            // Parse JSON statistics if present
+            if (preg_match('/\[STATS\]\s+(.+)/', $line, $matches)) {
+                $jsonStats = json_decode($matches[1], true);
+                if ($jsonStats) {
+                    $stats = array_merge($stats, $jsonStats);
+                }
+            }
+        }
+        
+        // Calculate total detections and average
+        if (!empty($detectionCounts)) {
+            $stats['total_detections'] = array_sum($detectionCounts);
+            $stats['average_detections_per_frame'] = round($stats['total_detections'] / count($detectionCounts), 2);
+        }
+        
+        return $stats;
     }
 
     private function getModelPath(): string
     {
         // Try custom model paths in order of preference
+        // Prioritize the exact path from the reference script first
         $possiblePaths = [
-            '/Users/jfrtenebroso/Developer/Thesis-Yolov8/best.pt',
-            '/Users/jfrtenebroso/Developer/Thesis/2025-10-18_stage6_final/weights/best.pt',
-            '/Users/jfrtenebroso/Developer/LaravelDevelopment/Thesis/2025-10-18_stage6_final/weights/best.pt',
+            '/Users/jfrtenebroso/Developer/Thesis/2025-10-18_stage6_final/weights/best.pt',  // Reference script path
+            '/Users/jfrtenebroso/Developer/Thesis-Yolov8/best.pt',            
             '/Users/jfrtenebroso/Developer/LaravelDevelopment/Thesis/model/best.pt',
             base_path('model/best.pt'),
             // Fallback to YOLO's built-in models if no custom model found
@@ -191,110 +263,158 @@ class VideoInferenceService
     private function getInferenceScript(): string
     {
         return <<<'PYTHON'
+"""
+YOLOv8 Inference Script - Optimized for Mac Silicon M4
+Uses MPS (Metal Performance Shaders) for GPU acceleration on Apple Silicon
+Enhanced with progress tracking and detection statistics
+"""
 import sys
 import os
 import argparse
+import json
 from pathlib import Path
 from ultralytics import YOLO
+import shutil
+import tempfile
+import cv2
+
+
+def get_video_frame_count(video_path):
+    """Get total frame count using OpenCV"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        return frame_count
+    except Exception as e:
+        print(f"[WARNING] Could not get frame count: {str(e)}", file=sys.stderr)
+        return 0
+
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='YOLO inference for Mac Silicon M4')
     parser.add_argument('--model', required=True, help='Path to model file')
     parser.add_argument('--source', required=True, help='Path to input video')
     parser.add_argument('--output', required=True, help='Path to output video')
+    parser.add_argument('--conf', type=float, default=0.25, help='Confidence threshold')
     args = parser.parse_args()
 
-    print(f"[INFO] Python version: {sys.version}", file=sys.stderr)
+    print(f"[INFO] Python: {sys.version}", file=sys.stderr)
     print(f"[INFO] Working directory: {os.getcwd()}", file=sys.stderr)
-    print(f"[INFO] Loading model from: {args.model}", file=sys.stderr)
     
-    # Check if it's a built-in YOLO model or custom model file
-    builtin_models = [
-        'yolov8n.pt', 'yolov8s.pt', 'yolov8m.pt', 'yolov8l.pt', 'yolov8x.pt',
-        'yolov8n-cls.pt', 'yolov8s-cls.pt', 'yolov8m-cls.pt', 'yolov8l-cls.pt', 'yolov8x-cls.pt',
-        'yolov8n-seg.pt', 'yolov8s-seg.pt', 'yolov8m-seg.pt', 'yolov8l-seg.pt', 'yolov8x-seg.pt',
-    ]
+    # Detect device - prioritize MPS for Mac Silicon
+    device = 'cpu'
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            device = 'mps'
+            print(f"[INFO] Using MPS (Metal Performance Shaders) - Mac GPU acceleration", file=sys.stderr)
+        else:
+            print(f"[INFO] MPS not available, using CPU", file=sys.stderr)
+    except Exception as e:
+        print(f"[INFO] Could not detect MPS, using CPU: {str(e)}", file=sys.stderr)
     
-    if os.path.basename(args.model) not in builtin_models and not os.path.exists(args.model):
-        print(f"[ERROR] Model not found at {args.model}", file=sys.stderr)
+    # Validate model file
+    if not os.path.exists(args.model):
+        print(f"[ERROR] Model not found: {args.model}", file=sys.stderr)
         sys.exit(1)
     
-    if os.path.basename(args.model) in builtin_models:
-        print(f"[INFO] Using built-in YOLO model: {args.model}", file=sys.stderr)
-    else:
-        print(f"[INFO] Using custom model file: {args.model}", file=sys.stderr)
-        
-    model = YOLO(args.model)
-    print(f"[INFO] Model loaded successfully!", file=sys.stderr)
+    model_size = os.path.getsize(args.model) / (1024 * 1024)
+    print(f"[INFO] Model: {args.model} ({model_size:.1f} MB)", file=sys.stderr)
+    print(f"[INFO] Confidence threshold: {args.conf}", file=sys.stderr)
     
-    print(f"[INFO] Processing video: {args.source}", file=sys.stderr)
+    # Get total frame count for progress tracking
+    total_frames = get_video_frame_count(args.source)
+    if total_frames > 0:
+        print(f"[INFO] Total frames: {total_frames}", file=sys.stderr)
     
-    # Ensure output directory exists
+    # Load model
+    try:
+        model = YOLO(args.model)
+        print(f"[INFO] Model loaded successfully", file=sys.stderr)
+    except Exception as e:
+        print(f"[ERROR] Failed to load model: {str(e)}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Prepare output
     output_dir = os.path.dirname(args.output)
     os.makedirs(output_dir, exist_ok=True)
-    print(f"[INFO] Output directory: {output_dir}", file=sys.stderr)
     
-    # Create a temporary directory for YOLO output
-    import tempfile
     temp_dir = tempfile.mkdtemp()
-    print(f"[INFO] Temp directory: {temp_dir}", file=sys.stderr)
+    print(f"[INFO] Processing: {args.source}", file=sys.stderr)
     
     try:
-        # Run inference - YOLO will save to temp_dir/predict
+        # Run inference with Mac Silicon optimizations
         results = model.predict(
             source=args.source,
+            device=device,       # Use MPS or CPU
+            imgsz=832,           # Match training size
+            conf=args.conf,      # Use specified confidence threshold
+            iou=0.45,            # NMS threshold
             save=True,
+            show_labels=True,
+            show_conf=True,
+            show=False,
+            stream=True,         # Memory efficient
             project=temp_dir,
             name='predict',
             exist_ok=True,
-            conf=0.25,
-            iou=0.45,
-            show_labels=True,
-            show_conf=True,
+            verbose=False,
         )
         
-        print(f"[INFO] Inference complete!", file=sys.stderr)
+        # Process frames and collect statistics
+        frame_count = 0
+        detection_counts = []
         
-        # Find the output video in temp directory
+        for result in results:
+            frame_count += 1
+            detections = len(result.boxes) if result.boxes is not None else 0
+            detection_counts.append(detections)
+            
+            # Report progress every 30 frames
+            if frame_count % 30 == 0:
+                print(f"   Frame {frame_count}: {detections} detections", file=sys.stderr)
+        
+        # Calculate final statistics
+        total_detections = sum(detection_counts)
+        avg_detections = total_detections / frame_count if frame_count > 0 else 0
+        
+        print(f"[INFO] Processed {frame_count} frames", file=sys.stderr)
+        print(f"[INFO] Total detections: {total_detections}", file=sys.stderr)
+        print(f"[INFO] Average detections per frame: {avg_detections:.2f}", file=sys.stderr)
+        
+        # Output structured statistics for parsing
+        stats = {
+            'total_frames': frame_count,
+            'processed_frames': frame_count,
+            'total_detections': total_detections,
+            'average_detections_per_frame': round(avg_detections, 2)
+        }
+        print(f"[STATS] {json.dumps(stats)}", file=sys.stderr)
+        
+        # Move output video
         predict_dir = Path(temp_dir) / 'predict'
-        print(f"[INFO] Looking for output in: {predict_dir}", file=sys.stderr)
-        
-        if predict_dir.exists():
-            # Find video files
-            video_files = (
-                list(predict_dir.glob('*.mp4')) + 
-                list(predict_dir.glob('*.avi')) +
-                list(predict_dir.glob('*.mov'))
-            )
-            
-            if video_files:
-                import shutil
-                source_video = str(video_files[0])
-                print(f"[INFO] Moving {source_video} to {args.output}", file=sys.stderr)
-                shutil.move(source_video, args.output)
-                print(f"[SUCCESS] Output saved to {args.output}", file=sys.stderr)
-                
-                # Clean up temp directory
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                sys.exit(0)
-            else:
-                print(f"[ERROR] No video files found in {predict_dir}", file=sys.stderr)
-                print(f"[ERROR] Directory contents: {list(predict_dir.iterdir())}", file=sys.stderr)
-                sys.exit(1)
-        else:
-            print(f"[ERROR] Predict directory not created: {predict_dir}", file=sys.stderr)
+        if not predict_dir.exists():
+            print(f"[ERROR] Output directory not created", file=sys.stderr)
             sys.exit(1)
-            
+        
+        video_files = list(predict_dir.glob('*.mp4')) + list(predict_dir.glob('*.avi'))
+        if not video_files:
+            print(f"[ERROR] No output video found", file=sys.stderr)
+            sys.exit(1)
+        
+        shutil.move(str(video_files[0]), args.output)
+        print(f"[SUCCESS] Output: {args.output}", file=sys.stderr)
+        
     except Exception as e:
-        print(f"[ERROR] Exception: {str(e)}", file=sys.stderr)
+        print(f"[ERROR] {str(e)}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
     finally:
-        # Clean up temp directory
-        import shutil
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     main()

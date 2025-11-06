@@ -30,9 +30,45 @@ class ProcessVideoJob implements ShouldQueue
                 'video_path' => $this->video->original_path,
             ]);
 
-            $this->video->update(['status' => 'processing']);
+            // Initialize processing state
+            $this->video->update([
+                'status' => 'processing',
+                'processing_progress' => 0,
+                'processed_frames' => 0,
+            ]);
 
-            $success = $inferenceService->processVideo($this->video);
+            // Process video with progress callback
+            $success = $inferenceService->processVideo(
+                $this->video,
+                function($progress, $stats = []) {
+                    $updateData = ['processing_progress' => $progress];
+                    
+                    // Update statistics if provided
+                    if (!empty($stats)) {
+                        if (isset($stats['processed_frames'])) {
+                            $updateData['processed_frames'] = $stats['processed_frames'];
+                        }
+                        if (isset($stats['total_frames'])) {
+                            $updateData['total_frames'] = $stats['total_frames'];
+                        }
+                        if (isset($stats['total_detections'])) {
+                            $updateData['total_detections'] = $stats['total_detections'];
+                        }
+                        if (isset($stats['average_detections_per_frame'])) {
+                            $updateData['average_detections_per_frame'] = $stats['average_detections_per_frame'];
+                        }
+                    }
+                    
+                    // Update video record
+                    $this->video->fresh()->update($updateData);
+                    
+                    Log::debug('Processing progress', [
+                        'video_id' => $this->video->id,
+                        'progress' => $progress,
+                        'stats' => $stats,
+                    ]);
+                }
+            );
 
             if (!$success) {
                 throw new \Exception('Video processing returned false');

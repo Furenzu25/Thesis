@@ -13,18 +13,39 @@ class Video extends Model
     protected $fillable = [
         'title',
         'description',
+        'location_name',
+        'time_of_day',
+        'weather_condition',
         'original_filename',
         'original_path',
         'processed_path',
         'file_size',
+        'duration_seconds',
+        'resolution',
+        'video_format',
         'status',
         'error_message',
         'processing_duration',
+        'confidence_threshold',
+        'privacy_blur_enabled',
+        'total_frames',
+        'processed_frames',
+        'processing_progress',
+        'total_detections',
+        'average_detections_per_frame',
     ];
 
     protected $casts = [
         'file_size' => 'integer',
         'processing_duration' => 'integer',
+        'duration_seconds' => 'integer',
+        'confidence_threshold' => 'decimal:2',
+        'privacy_blur_enabled' => 'boolean',
+        'total_frames' => 'integer',
+        'processed_frames' => 'integer',
+        'processing_progress' => 'decimal:2',
+        'total_detections' => 'integer',
+        'average_detections_per_frame' => 'decimal:2',
     ];
 
     public function getOriginalVideoUrlAttribute(): ?string
@@ -56,5 +77,48 @@ class Video extends Model
     public function isProcessed(): bool
     {
         return $this->status === 'completed' && $this->processed_path !== null;
+    }
+
+    public function getDurationFormattedAttribute(): string
+    {
+        if (!$this->duration_seconds) {
+            return 'N/A';
+        }
+        
+        $minutes = floor($this->duration_seconds / 60);
+        $seconds = $this->duration_seconds % 60;
+        
+        return sprintf('%d:%02d', $minutes, $seconds);
+    }
+
+    public function getMetadataLabelAttribute(): string
+    {
+        $parts = array_filter([
+            $this->location_name,
+            $this->time_of_day,
+            $this->weather_condition,
+        ]);
+        
+        return !empty($parts) ? implode(' - ', $parts) : 'No metadata';
+    }
+
+    public function getProgressPercentageAttribute(): int
+    {
+        return (int) $this->processing_progress;
+    }
+
+    public function isProcessing(): bool
+    {
+        return $this->status === 'processing';
+    }
+
+    public function isPending(): bool
+    {
+        return $this->status === 'pending';
+    }
+
+    public function hasFailed(): bool
+    {
+        return $this->status === 'failed';
     }
 }
