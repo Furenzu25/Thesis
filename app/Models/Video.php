@@ -28,11 +28,19 @@ class Video extends Model
         'processing_duration',
         'confidence_threshold',
         'privacy_blur_enabled',
+        'traffic_direction',
         'total_frames',
         'processed_frames',
         'processing_progress',
         'total_detections',
         'average_detections_per_frame',
+        'class_counts',
+        'traffic_timeline',
+        'peak_minute',
+        'peak_count',
+        'line_crossing_count',
+        'line_crossing_direction',
+        'line_crossing_by_class',
     ];
 
     protected $casts = [
@@ -46,6 +54,12 @@ class Video extends Model
         'processing_progress' => 'decimal:2',
         'total_detections' => 'integer',
         'average_detections_per_frame' => 'decimal:2',
+        'class_counts' => 'array',
+        'traffic_timeline' => 'array',
+        'peak_minute' => 'integer',
+        'peak_count' => 'integer',
+        'line_crossing_count' => 'integer',
+        'line_crossing_by_class' => 'array',
     ];
 
     public function getOriginalVideoUrlAttribute(): ?string

@@ -141,9 +141,66 @@ class ViewVideo extends ViewRecord
                             ->label('Processed Frames')
                             ->formatStateUsing(fn ($state) => number_format($state ?? 0))
                             ->icon('heroicon-o-check-circle'),
+                        Infolists\Components\TextEntry::make('peak_traffic')
+                            ->label('Peak Traffic')
+                            ->formatStateUsing(fn ($record) => 
+                                $record->peak_minute !== null && $record->peak_count !== null
+                                    ? "Minute {$record->peak_minute}: {$record->peak_count} vehicles"
+                                    : 'N/A'
+                            )
+                            ->icon('heroicon-o-arrow-trending-up')
+                            ->columnSpanFull(),
                     ])
                     ->columns(4)
                     ->visible(fn ($record) => $record->isProcessed())
+                    ->collapsible(),
+                
+                Infolists\Components\Section::make('Line Crossing Detection')
+                    ->description('Vehicles crossing the virtual counting line')
+                    ->schema([
+                        Infolists\Components\TextEntry::make('traffic_direction')
+                            ->label('Traffic Direction')
+                            ->formatStateUsing(fn ($state) => match($state) {
+                                'left_to_right' => 'Left → Right',
+                                'right_to_left' => 'Right → Left',
+                                'top_to_bottom' => 'Top → Bottom',
+                                'bottom_to_top' => 'Bottom → Top',
+                                default => 'None'
+                            })
+                            ->badge()
+                            ->color('info')
+                            ->icon('heroicon-o-arrow-right-circle'),
+                        Infolists\Components\TextEntry::make('line_crossing_count')
+                            ->label('Total Line Crossings')
+                            ->formatStateUsing(fn ($state) => number_format($state ?? 0))
+                            ->icon('heroicon-o-check-badge')
+                            ->badge()
+                            ->color('success'),
+                        Infolists\Components\ViewEntry::make('line_crossing_by_class')
+                            ->label('Crossings by Vehicle Class')
+                            ->view('filament.infolists.line-crossing-breakdown')
+                            ->columnSpanFull(),
+                    ])
+                    ->columns(2)
+                    ->visible(fn ($record) => $record->isProcessed() && $record->traffic_direction !== 'none' && !empty($record->line_crossing_by_class))
+                    ->collapsible(),
+                
+                Infolists\Components\Section::make('Class-Wise Vehicle Counts')
+                    ->description('Breakdown of detections by vehicle class')
+                    ->schema([
+                        Infolists\Components\ViewEntry::make('class_counts')
+                            ->view('filament.infolists.class-counts-table'),
+                    ])
+                    ->visible(fn ($record) => $record->isProcessed() && !empty($record->class_counts))
+                    ->collapsible(),
+                
+                Infolists\Components\Section::make('Traffic Flow Over Time')
+                    ->description('Vehicle detections per minute throughout the video')
+                    ->schema([
+                        Infolists\Components\ViewEntry::make('traffic_timeline')
+                            ->view('filament.infolists.traffic-timeline-chart'),
+                    ])
+                    ->visible(fn ($record) => $record->isProcessed() && !empty($record->traffic_timeline))
                     ->collapsible(),
                 
                 Infolists\Components\Section::make('Video Player')

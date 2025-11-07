@@ -27,15 +27,20 @@ class CreateVideo extends CreateRecord
             // Get original filename
             $data['original_filename'] = basename($filePath);
             
-            // Extract video properties using PHP video info if available
+            // Extract video properties using OpenCV (via conda Python environment)
             try {
                 $videoInfo = $this->extractVideoProperties($fullPath);
                 $data['duration_seconds'] = $videoInfo['duration'];
                 $data['resolution'] = $videoInfo['resolution'];
                 $data['video_format'] = $videoInfo['format'];
                 
+                // Also store total frames if available
+                if (isset($videoInfo['total_frames'])) {
+                    $data['total_frames'] = $videoInfo['total_frames'];
+                }
+                
                 // Validate duration (warn if > 5 minutes)
-                if ($data['duration_seconds'] > 300) { // 5 minutes
+                if ($data['duration_seconds'] && $data['duration_seconds'] > 300) { // 5 minutes
                     Notification::make()
                         ->warning()
                         ->title('Long Video Detected')
@@ -43,6 +48,13 @@ class CreateVideo extends CreateRecord
                         ->persistent()
                         ->send();
                 }
+                
+                // Log success
+                \Log::info('Video properties extracted', [
+                    'duration' => $data['duration_seconds'],
+                    'resolution' => $data['resolution'],
+                    'total_frames' => $data['total_frames'] ?? 'N/A',
+                ]);
                 
             } catch (\Exception $e) {
                 // If extraction fails, log it but continue
@@ -72,18 +84,52 @@ class CreateVideo extends CreateRecord
 
     protected function extractVideoProperties(string $videoPath): array
     {
-        // Try using getID3 library if available
-        if (class_exists('\getID3')) {
-            $getID3 = new \getID3();
-            $fileInfo = $getID3->analyze($videoPath);
-            
-            return [
-                'duration' => isset($fileInfo['playtime_seconds']) ? (int) $fileInfo['playtime_seconds'] : null,
-                'resolution' => isset($fileInfo['video']['resolution_x'], $fileInfo['video']['resolution_y']) 
-                    ? $fileInfo['video']['resolution_x'] . 'x' . $fileInfo['video']['resolution_y']
-                    : 'Unknown',
-                'format' => $fileInfo['fileformat'] ?? 'mp4',
-            ];
+        // Use Python with OpenCV (same environment as inference)
+        // This is the most reliable method since we already have conda environment set up
+        $pythonPath = '/opt/homebrew/Caskroom/miniforge/base/envs/yolov8_m4/bin/python';
+        
+        if (file_exists($pythonPath)) {
+            try {
+                $script = $this->getVideoPropertiesScript();
+                $scriptPath = storage_path('app/video_props_script.py');
+                file_put_contents($scriptPath, $script);
+                
+                $command = sprintf(
+                    '%s %s %s 2>&1',
+                    escapeshellarg($pythonPath),
+                    escapeshellarg($scriptPath),
+                    escapeshellarg($videoPath)
+                );
+                
+                exec($command, $output, $returnCode);
+                
+                // Clean up script
+                @unlink($scriptPath);
+                
+                if ($returnCode === 0 && !empty($output)) {
+                    $json = implode("\n", $output);
+                    $properties = json_decode($json, true);
+                    
+                    if ($properties && isset($properties['duration'])) {
+                        \Log::info('Video properties extracted successfully', $properties);
+                        
+                        return [
+                            'duration' => $properties['duration'],
+                            'resolution' => $properties['resolution'],
+                            'format' => $properties['format'],
+                            'total_frames' => $properties['total_frames'] ?? null,
+                            'fps' => $properties['fps'] ?? null,
+                        ];
+                    }
+                }
+                
+                \Log::warning('Python extraction completed but no valid output', [
+                    'return_code' => $returnCode,
+                    'output' => implode("\n", $output ?? [])
+                ]);
+            } catch (\Exception $e) {
+                \Log::warning('Python video extraction failed: ' . $e->getMessage());
+            }
         }
         
         // Fallback: Try using ffprobe if available
@@ -116,6 +162,70 @@ class CreateVideo extends CreateRecord
             'resolution' => 'Unknown',
             'format' => pathinfo($videoPath, PATHINFO_EXTENSION),
         ];
+    }
+    
+    protected function getVideoPropertiesScript(): string
+    {
+        return <<<'PYTHON'
+import sys
+import cv2
+import json
+import os
+
+def get_video_properties(video_path):
+    try:
+        cap = cv2.VideoCapture(video_path)
+        
+        if not cap.isOpened():
+            return None
+        
+        # Get video properties
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Calculate duration in seconds
+        duration = int(frame_count / fps) if fps > 0 else 0
+        
+        # Get format from file extension
+        file_format = os.path.splitext(video_path)[1][1:]  # Remove the dot
+        
+        cap.release()
+        
+        properties = {
+            'duration': duration,
+            'resolution': f'{width}x{height}',
+            'format': file_format,
+            'total_frames': frame_count,
+            'fps': round(fps, 2)
+        }
+        
+        return properties
+        
+    except Exception as e:
+        print(f"Error: {str(e)}", file=sys.stderr)
+        return None
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python script.py <video_path>", file=sys.stderr)
+        sys.exit(1)
+    
+    video_path = sys.argv[1]
+    
+    if not os.path.exists(video_path):
+        print(f"Video file not found: {video_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    properties = get_video_properties(video_path)
+    
+    if properties:
+        print(json.dumps(properties))
+        sys.exit(0)
+    else:
+        sys.exit(1)
+PYTHON;
     }
 
     protected function afterCreate(): void

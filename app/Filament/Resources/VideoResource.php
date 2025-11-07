@@ -112,6 +112,20 @@ class VideoResource extends Resource
                                     ->helperText('Anonymize faces and license plates (if supported)')
                                     ->default(false),
                             ]),
+                        
+                        Forms\Components\Select::make('traffic_direction')
+                            ->label('Traffic Direction (Line Crossing Detection)')
+                            ->options([
+                                'none' => 'None - Standard Detection Only',
+                                'left_to_right' => 'Left → Right (Line 150px from right edge)',
+                                'right_to_left' => 'Right → Left (Line 150px from left edge)',
+                                'top_to_bottom' => 'Top → Bottom (Line 150px from bottom edge)',
+                                'bottom_to_top' => 'Bottom → Top (Line 150px from top edge)',
+                            ])
+                            ->default('none')
+                            ->helperText('Enable line crossing detection to track and count vehicles. Green line = counting line (150px from edge). Yellow line = entry zone (120px before counting line). Vehicles must start in entry zone to be counted.')
+                            ->native(false)
+                            ->searchable(),
                     ])
                     ->collapsed()
                     ->collapsible(),
@@ -158,7 +172,7 @@ class VideoResource extends Resource
                 Tables\Columns\TextColumn::make('processing_progress')
                     ->label('Progress')
                     ->formatStateUsing(fn ($state) => $state ? "{$state}%" : 'N/A')
-                    ->visible(fn (Video $record) => $record->isProcessing()),
+                    ->visible(fn (?Video $record) => $record?->isProcessing() ?? false),
                 
                 Tables\Columns\TextColumn::make('created_at')
                     ->label('Uploaded')
