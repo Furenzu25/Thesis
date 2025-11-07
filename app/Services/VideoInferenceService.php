@@ -9,6 +9,33 @@ use Illuminate\Support\Facades\Storage;
 
 class VideoInferenceService
 {
+    // ========================================
+    // CONFIGURATION - Update these paths for your system
+    // ========================================
+    
+    /**
+     * Windows Python Path
+     * Find your conda Python by running: conda info --envs
+     * Then locate python.exe in that environment folder
+     * Example: C:\Users\YourName\miniconda3\envs\yolov8_m4\python.exe
+     */
+    private const WINDOWS_PYTHON_PATH = 'C:\Users\Janfl\.conda\envs\yolov8_py312\python.exe';
+    
+    /**
+     * Mac Python Path (for cross-platform compatibility)
+     */
+    private const MAC_PYTHON_PATH = '/opt/homebrew/Caskroom/miniforge/base/envs/yolov8_m4/bin/python';
+    
+    /**
+     * Custom Model Path (Stage 7)
+     * Already configured for your A: drive location
+     */
+    private const CUSTOM_MODEL_PATH = 'A:/Opencv/thesis-yolov8/runs/2025-10-28_033053_stage7_chonghua/weights/best.pt';
+    
+    // ========================================
+    // END CONFIGURATION
+    // ========================================
+    
     private string $modelPath;
     private string $condaEnv = 'yolov8_m4';
     
@@ -131,24 +158,43 @@ class VideoInferenceService
 
         // Change to Laravel project directory before running
         $projectPath = base_path();
+        $isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
 
         // Build command with confidence threshold, privacy blur, and traffic direction
         $confidenceThreshold = $video->confidence_threshold ?? 0.25;
         $privacyBlur = $video->privacy_blur_enabled ? '--blur' : '';
         $trafficDirection = $this->normalizeDirection($video->traffic_direction ?? 'none');
         
-        $command = sprintf(
-            'cd %s && %s %s --model %s --source %s --output %s --conf %s --direction %s %s 2>&1',
-            escapeshellarg($projectPath),
-            escapeshellarg($condaPath),
-            escapeshellarg($scriptPath),
-            escapeshellarg($this->modelPath),
-            escapeshellarg($inputPath),
-            escapeshellarg($outputPath),
-            $confidenceThreshold,
-            escapeshellarg($trafficDirection),
-            $privacyBlur
-        );
+        // Build command based on OS
+        if ($isWindows) {
+            // Windows PowerShell command
+            $command = sprintf(
+                'cd /d %s && %s %s --model %s --source %s --output %s --conf %s --direction %s %s 2>&1',
+                escapeshellarg($projectPath),
+                escapeshellarg($condaPath),
+                escapeshellarg($scriptPath),
+                escapeshellarg($this->modelPath),
+                escapeshellarg($inputPath),
+                escapeshellarg($outputPath),
+                $confidenceThreshold,
+                escapeshellarg($trafficDirection),
+                $privacyBlur
+            );
+        } else {
+            // Unix/Mac command
+            $command = sprintf(
+                'cd %s && %s %s --model %s --source %s --output %s --conf %s --direction %s %s 2>&1',
+                escapeshellarg($projectPath),
+                escapeshellarg($condaPath),
+                escapeshellarg($scriptPath),
+                escapeshellarg($this->modelPath),
+                escapeshellarg($inputPath),
+                escapeshellarg($outputPath),
+                $confidenceThreshold,
+                escapeshellarg($trafficDirection),
+                $privacyBlur
+            );
+        }
 
         Log::info('Running inference command', [
             'command' => $command,
@@ -156,6 +202,7 @@ class VideoInferenceService
             'confidence_threshold' => $confidenceThreshold,
             'privacy_blur_enabled' => $video->privacy_blur_enabled,
             'traffic_direction' => $trafficDirection,
+            'os' => $isWindows ? 'Windows' : 'Unix',
         ]);
 
         $result = Process::timeout(600)->run($command);
@@ -257,14 +304,23 @@ class VideoInferenceService
     private function getModelPath(): string
     {
         // Try custom model paths in order of preference
-        // Prioritize the exact path from the reference script first
         $possiblePaths = [
-            '/Users/jfrtenebroso/Developer/Thesis/2025-10-18_stage6_final/weights/best.pt',  // Reference script path
-            '/Users/jfrtenebroso/Developer/Thesis-Yolov8/best.pt',            
-            '/Users/jfrtenebroso/Developer/LaravelDevelopment/Thesis/model/best.pt',
+            // Custom model from configuration (Stage 7 - prioritized)
+            self::CUSTOM_MODEL_PATH,
+            str_replace('/', '\\', self::CUSTOM_MODEL_PATH), // Try backslashes
+            
+            // Alternative Windows locations
             base_path('model/best.pt'),
+            base_path('model\\best.pt'),
+            'C:/models/best.pt',
+            'C:\\models\\best.pt',
+            
+            // Mac paths (for cross-platform compatibility)
+            '/Users/jfrtenebroso/Developer/Thesis/2025-10-18_stage6_final/weights/best.pt',
+            '/Users/jfrtenebroso/Developer/Thesis-Yolov8/best.pt',
+            
             // Fallback to YOLO's built-in models if no custom model found
-            'yolov8x.pt',  // Extra large model (matches your custom yolov8x)
+            'yolov8x.pt',  // Extra large model
             'yolov8m.pt',  // Medium model
             'yolov8n.pt',  // Nano model (fastest)
             'yolov8s.pt',  // Small model
@@ -279,7 +335,7 @@ class VideoInferenceService
 
         // If no custom model found, return a YOLO built-in model name
         // YOLO will automatically download it when first used
-        Log::info("No custom model found, using built-in yolov8m.pt");
+        Log::warning("No custom model found, using built-in yolov8m.pt");
         return 'yolov8m.pt';
     }
 
@@ -297,15 +353,73 @@ class VideoInferenceService
 
     private function getCondaPythonPath(): string
     {
-        // Hardcode your exact conda Python path
-        $pythonPath = '/opt/homebrew/Caskroom/miniforge/base/envs/yolov8_m4/bin/python';
+        // Detect OS and set appropriate Python path
+        $isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
         
-        if (file_exists($pythonPath)) {
-            Log::info('Using hardcoded conda Python at: ' . $pythonPath);
-            return $pythonPath;
+        if ($isWindows) {
+            // First, try the configured path from constants
+            if (file_exists(self::WINDOWS_PYTHON_PATH)) {
+                Log::info('Using configured Windows Python at: ' . self::WINDOWS_PYTHON_PATH);
+                return self::WINDOWS_PYTHON_PATH;
+            }
+            
+            // Windows conda Python paths (try multiple locations)
+            $windowsPaths = [
+                // User's .conda directory (common for newer conda installations)
+                'C:\\Users\\' . get_current_user() . '\\.conda\\envs\\yolov8_py312\\python.exe',
+                'C:\\Users\\' . get_current_user() . '\\.conda\\envs\\yolov8_m4\\python.exe',
+                'C:\\Users\\' . get_current_user() . '\\.conda\\envs\\yolov8\\python.exe',
+                
+                // Common conda installation paths on Windows
+                'C:\\Users\\' . get_current_user() . '\\miniconda3\\envs\\yolov8_py312\\python.exe',
+                'C:\\Users\\' . get_current_user() . '\\miniconda3\\envs\\yolov8_m4\\python.exe',
+                'C:\\Users\\' . get_current_user() . '\\anaconda3\\envs\\yolov8_py312\\python.exe',
+                'C:\\Users\\' . get_current_user() . '\\anaconda3\\envs\\yolov8_m4\\python.exe',
+                'C:\\ProgramData\\miniconda3\\envs\\yolov8_m4\\python.exe',
+                'C:\\ProgramData\\Anaconda3\\envs\\yolov8_m4\\python.exe',
+                
+                // Try with different env names
+                'C:\\Users\\' . get_current_user() . '\\miniconda3\\envs\\yolov8\\python.exe',
+                'C:\\Users\\' . get_current_user() . '\\anaconda3\\envs\\yolov8\\python.exe',
+                
+                // Laragon's Python (if available)
+                'C:\\laragon\\bin\\python\\python.exe',
+            ];
+            
+            foreach ($windowsPaths as $path) {
+                if (file_exists($path)) {
+                    Log::info('Using Windows Python at: ' . $path);
+                    return $path;
+                }
+            }
+            
+            // If no conda found, try system Python
+            $systemPython = trim(shell_exec('where python 2>NUL') ?? '');
+            if (!empty($systemPython)) {
+                $pythonPath = explode("\n", $systemPython)[0];
+                if (file_exists(trim($pythonPath))) {
+                    Log::info('Using system Python at: ' . $pythonPath);
+                    return trim($pythonPath);
+                }
+            }
+            
+            $errorMsg = "Python not found. Please:\n";
+            $errorMsg .= "1. Install Miniconda/Anaconda with yolov8_m4 environment\n";
+            $errorMsg .= "2. Install required packages: pip install ultralytics opencv-python torch\n";
+            $errorMsg .= "3. Update WINDOWS_PYTHON_PATH in app/Services/VideoInferenceService.php (line ~20)\n";
+            $errorMsg .= "   Current configured path: " . self::WINDOWS_PYTHON_PATH;
+            
+            throw new \Exception($errorMsg);
+            
+        } else {
+            // Mac/Linux Python path - try configured path first
+            if (file_exists(self::MAC_PYTHON_PATH)) {
+                Log::info('Using configured Mac Python at: ' . self::MAC_PYTHON_PATH);
+                return self::MAC_PYTHON_PATH;
+            }
+            
+            throw new \Exception("Python not found at: " . self::MAC_PYTHON_PATH);
         }
-        
-        throw new \Exception("Python not found at: {$pythonPath}");
     }
 
     private function getInferenceScript(): string
@@ -556,17 +670,24 @@ def main():
         if face_cascade.empty():
             print(f"[WARNING] Could not load face cascade, privacy blur may not work", file=sys.stderr)
     
-    # Detect device - prioritize MPS for Mac Silicon
+    # Detect device - prioritize CUDA (NVIDIA GPU) for Windows, then MPS for Mac Silicon
     device = 'cpu'
     try:
         import torch
-        if torch.backends.mps.is_available():
+        if torch.cuda.is_available():
+            device = 'cuda'
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            print(f"[INFO] Using CUDA GPU: {gpu_name} ({gpu_memory:.1f} GB)", file=sys.stderr)
+            print(f"[INFO] CUDA version: {torch.version.cuda}", file=sys.stderr)
+        elif torch.backends.mps.is_available():
             device = 'mps'
             print(f"[INFO] Using MPS (Metal Performance Shaders) - Mac GPU acceleration", file=sys.stderr)
         else:
-            print(f"[INFO] MPS not available, using CPU", file=sys.stderr)
+            print(f"[INFO] No GPU detected, using CPU (this will be slower)", file=sys.stderr)
+            print(f"[INFO] To enable GPU: Install CUDA toolkit and PyTorch with CUDA support", file=sys.stderr)
     except Exception as e:
-        print(f"[INFO] Could not detect MPS, using CPU: {str(e)}", file=sys.stderr)
+        print(f"[WARNING] Could not detect GPU, using CPU: {str(e)}", file=sys.stderr)
     
     # Validate model file (allow built-in YOLO models)
     BUILT_INS = {
